@@ -1,0 +1,53 @@
+# 依赖目录
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 构建输出
+dist/
+build/
+*.exe
+*.dmg
+*.pkg
+
+# 数据文件（包含敏感信息）
+data/session-whatsapp-bot-v2/
+data/capital.json
+data/config.json
+data/logs/
+data/backups/
+
+# 日志文件
+logs/
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 环境变量
+.env
+.env.local
+
+# 临时文件
+*.tmp
+*.temp
+.cache/
+
+# Electron相关
+out/
+*.asar
+
+# 其他
+package-lock.json.bak
+yarn.lock.bak
+

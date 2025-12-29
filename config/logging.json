@@ -1,0 +1,28 @@
+{
+  "console": {
+    "level": "warn",
+    "enabled": true,
+    "filters": {
+      "messageReceived": false,
+      "messageSent": false,
+      "heartbeat": false,
+      "adminOperation": false,
+      "queueProcessing": false,
+      "chromeDetection": false,
+      "fileCreation": false,
+      "loadingProgress": false,
+      "qrCode": false
+    }
+  },
+  "file": {
+    "level": "info",
+    "enabled": true,
+    "maxSize": "10MB",
+    "maxFiles": 5
+  },
+  "performance": {
+    "enabled": true,
+    "logSlowOperations": true,
+    "slowOperationThreshold": 1000
+  }
+}

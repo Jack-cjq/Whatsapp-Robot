@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp资金管理机器人 2.0</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <!-- 侧边栏 -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <i class="fas fa-robot"></i>
+                <h2>WhatsApp机器人 2.0</h2>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <button class="nav-btn active" data-tab="dashboard">
+                    <i class="fas fa-tachometer-alt"></i>
+                    仪表板
+                </button>
+                <button class="nav-btn" data-tab="logs">
+                    <i class="fas fa-list-alt"></i>
+                    日志
+                </button>
+                <button class="nav-btn" data-tab="config">
+                    <i class="fas fa-cog"></i>
+                    配置
+                </button>
+                <button class="nav-btn" data-tab="help">
+                    <i class="fas fa-question-circle"></i>
+                    帮助
+                </button>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="status-indicator">
+                    <span class="status-dot" id="statusDot"></span>
+                    <span class="status-text" id="statusText">正在连接...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 主内容区域 -->
+        <div class="main-content">
+            <!-- 仪表板 -->
+            <div class="tab-content active" id="dashboard">
+                <div class="content-header">
+                    <h1><i class="fas fa-tachometer-alt"></i> 仪表板</h1>
+                    <p>WhatsApp资金管理机器人 2.0 控制中心</p>
+                </div>
+                
+                <div class="dashboard-grid">
+                    <div class="card">
+                        <div class="card-header">
+                            <i class="fas fa-chart-line"></i>
+                            <h3>系统状态</h3>
+                        </div>
+                        <div class="card-content">
+                            <div class="status-item">
+                                <span class="label">连接状态:</span>
+                                <span class="value" id="connectionStatus">检查中...</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="label">运行时间:</span>
+                                <span class="value" id="uptime">--:--:--</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="label">处理消息:</span>
+                                <span class="value" id="messageCount">0</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="label">消息队列:</span>
+                                <span class="value" id="queueStatus">0</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <i class="fas fa-users"></i>
+                            <h3>群组管理</h3>
+                        </div>
+                        <div class="card-content">
+                            <div class="status-item">
+                                <span class="label">活跃群组:</span>
+                                <span class="value" id="activeGroups">0</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="label">总操作数:</span>
+                                <span class="value" id="totalOperations">0</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <i class="fas fa-shield-alt"></i>
+                            <h3>管理员管理</h3>
+                        </div>
+                        <div class="card-content">
+                            <div class="status-item">
+                                <span class="label">管理员数量:</span>
+                                <span class="value" id="adminCount">0</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="label">权限检查:</span>
+                                <span class="value" id="permissionStatus">正常</span>
+                            </div>
+                            <div class="admin-actions">
+                                <button class="btn btn-primary btn-sm" onclick="showAddAdminModal()">
+                                    <i class="fas fa-plus"></i> 添加管理员
+                                </button>
+                                <button class="btn btn-secondary btn-sm" onclick="showAdminList()">
+                                    <i class="fas fa-list"></i> 查看列表
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <i class="fas fa-database"></i>
+                            <h3>数据管理</h3>
+                        </div>
+                        <div class="card-content">
+                            <div class="status-item">
+                                <span class="label">数据备份:</span>
+                                <span class="value" id="backupStatus">自动</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="label">存储状态:</span>
+                                <span class="value" id="storageStatus">正常</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="quick-actions">
+                    <h3>快速操作</h3>
+                    <div class="action-buttons">
+                        <button class="action-btn" onclick="refreshStatus()">
+                            <i class="fas fa-sync-alt"></i>
+                            刷新状态
+                        </button>
+                        <button class="action-btn" onclick="exportData()">
+                            <i class="fas fa-download"></i>
+                            导出数据
+                        </button>
+                        <button class="action-btn" onclick="clearLogs()">
+                            <i class="fas fa-trash"></i>
+                            清理日志
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 日志页面 -->
+            <div class="tab-content" id="logs">
+                <div class="content-header">
+                    <h1><i class="fas fa-list-alt"></i> 系统日志</h1>
+                    <div class="log-controls">
+                        <button class="btn btn-primary" onclick="refreshLogs()">
+                            <i class="fas fa-sync-alt"></i> 刷新
+                        </button>
+                        <button class="btn btn-secondary" onclick="clearLogs()">
+                            <i class="fas fa-trash"></i> 清空
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="log-container">
+                    <div class="log-filters">
+                        <select id="logLevel" onchange="filterLogs()">
+                            <option value="all">所有级别</option>
+                            <option value="SYSTEM">系统</option>
+                            <option value="OPERATION">操作</option>
+                            <option value="ERROR">错误</option>
+                            <option value="SECURITY">安全</option>
+                        </select>
+                        <input type="text" id="logSearch" placeholder="搜索日志..." onkeyup="filterLogs()">
+                    </div>
+                    
+                    <div class="log-list" id="logList">
+                        <div class="log-item">
+                            <span class="log-time">[加载中...]</span>
+                            <span class="log-message">正在获取日志数据...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 配置页面 -->
+            <div class="tab-content" id="config">
+                <div class="content-header">
+                    <h1><i class="fas fa-cog"></i> 系统配置</h1>
+                    <button class="btn btn-primary" onclick="saveConfig()">
+                        <i class="fas fa-save"></i> 保存配置
+                    </button>
+                </div>
+                
+                <div class="config-container">
+                    <div class="config-section">
+                        <h3>基本设置</h3>
+                        <div class="config-item">
+                            <label for="adminIds">管理员列表 (用逗号分隔):</label>
+                            <textarea id="adminIds" placeholder="输入管理员用户名，用逗号分隔"></textarea>
+                        </div>
+                        <div class="config-item">
+                            <label for="maxHistoryRecords">最大历史记录数:</label>
+                            <input type="number" id="maxHistoryRecords" min="100" max="10000" value="1000">
+                        </div>
+                    </div>
+
+                    <div class="config-section">
+                        <h3>备份设置</h3>
+                        <div class="config-item">
+                            <label>
+                                <input type="checkbox" id="autoBackup">
+                                启用自动备份
+                            </label>
+                        </div>
+                        <div class="config-item">
+                            <label for="backupInterval">备份间隔 (小时):</label>
+                            <input type="number" id="backupInterval" min="1" max="168" value="24">
+                        </div>
+                    </div>
+
+                    <div class="config-section">
+                        <h3>通知设置</h3>
+                        <div class="config-item">
+                            <label>
+                                <input type="checkbox" id="enableNotifications">
+                                启用通知
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 帮助页面 -->
+            <div class="tab-content" id="help">
+                <div class="content-header">
+                    <h1><i class="fas fa-question-circle"></i> 使用帮助</h1>
+                </div>
+                
+                <div class="help-container">
+                                         <div class="help-section">
+                         <h3>🤖 机器人命令</h3>
+                         <div class="command-list">
+                             <div class="command-item">
+                                 <span class="command">/查账 或 查账</span>
+                                 <span class="description">查看当前余额和最近操作记录</span>
+                             </div>
+                             <div class="command-item">
+                                 <span class="command">/清账 或 清账</span>
+                                 <span class="description">清空所有数据和历史记录</span>
+                             </div>
+                             <div class="command-item">
+                                 <span class="command">/撤回 或 撤回</span>
+                                 <span class="description">撤回最近一次操作</span>
+                             </div>
+                             <div class="command-item">
+                                 <span class="command">/帮助 或 帮助</span>
+                                 <span class="description">显示此帮助信息</span>
+                             </div>
+                         </div>
+                     </div>
+
+                                         <div class="help-section">
+                         <h3>🔢 数学计算</h3>
+                         <div class="command-list">
+                             <div class="command-item">
+                                 <span class="command">复合表达式</span>
+                                 <span class="description">1+2*3, (100+50)/2, 等等</span>
+                             </div>
+                             <div class="command-item">
+                                 <span class="command">简单计算</span>
+                                 <span class="description">+100, -50, *2, /3</span>
+                             </div>
+                             <div class="command-item">
+                                 <span class="command">直接设置</span>
+                                 <span class="description">1000 (设置为1000)</span>
+                             </div>
+                         </div>
+                     </div>
+
+                                         <div class="help-section">
+                         <h3>⚠️ 注意事项</h3>
+                         <ul class="notice-list">
+                             <li>只有管理员可以使用这些命令</li>
+                             <li>请确保在配置中正确设置管理员用户名</li>
+                             <li>机器人会自动记录所有操作历史</li>
+                             <li>支持自动备份功能，确保数据安全</li>
+                             <li>机器人只对特定命令和数学表达式有反应</li>
+                             <li>其他消息（包括闲聊）机器人不会回应</li>
+                         </ul>
+                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加管理员模态框 -->
+    <div id="addAdminModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-user-plus"></i> 添加管理员</h3>
+                <span class="close" onclick="closeAddAdminModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="newAdminName">管理员用户名:</label>
+                    <input type="text" id="newAdminName" placeholder="输入管理员用户名">
+                </div>
+                <div class="form-group">
+                    <label for="newAdminPhone">手机号码 (可选):</label>
+                    <input type="text" id="newAdminPhone" placeholder="输入手机号码">
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="addAdmin()">
+                        <i class="fas fa-plus"></i> 添加
+                    </button>
+                    <button class="btn btn-secondary" onclick="closeAddAdminModal()">
+                        <i class="fas fa-times"></i> 取消
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 管理员列表模态框 -->
+    <div id="adminListModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-users"></i> 管理员列表</h3>
+                <span class="close" onclick="closeAdminListModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="admin-list" id="adminList">
+                    <div class="loading">正在加载管理员列表...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="renderer.js"></script>
+</body>
+</html>
