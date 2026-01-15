@@ -236,33 +236,28 @@ class MessageManager {
     static maxQueueSize = 100;
     static processingDelay = 100; // 消息处理间隔
 
-    static async sendMessage(chat, message) {
+    // ✅ 新增：支持 options，并且队列里只存 chatId
+    static async sendMessage(chat, message, options = {}) {
         const chatId = chat.id._serialized;
         const messageKey = this.getMessageKey(chatId, message);
-        
-        // 检查重复发送
-        if (this.sendingMessages.has(messageKey)) {
-            // console.log(`🚫 检测到重复发送，跳过: ${message.substring(0, 30)}...`);
-            return null;
-        }
 
-        // 检查队列大小
+        if (this.sendingMessages.has(messageKey)) return null;
+
         if (this.messageQueue.length >= this.maxQueueSize) {
             console.log('⚠️ 消息队列已满，丢弃最旧的消息');
             this.messageQueue.shift();
         }
 
-        // 添加到队列
         this.messageQueue.push({
-            chat,
+            chatId,                 // ✅ 存 chatId，不存 chat 对象
             message,
+            options,                // ✅ 存 options
             messageKey,
             timestamp: Date.now(),
             retries: 0,
             maxRetries: 3
         });
 
-        // 开始处理队列
         if (!this.isProcessingQueue) {
             this.processMessageQueue();
         }
@@ -272,60 +267,52 @@ class MessageManager {
 
     static async processMessageQueue() {
         if (this.isProcessingQueue) return;
-        
         this.isProcessingQueue = true;
-        // console.log(`📤 开始处理消息队列，当前队列长度: ${this.messageQueue.length}`);
 
         while (this.messageQueue.length > 0) {
-            const messageItem = this.messageQueue.shift();
-            
-            // 检查消息是否过期（超过30秒）
-            if (Date.now() - messageItem.timestamp > 30000) {
+            const item = this.messageQueue.shift();
+
+            // 超过 30 秒丢弃
+            if (Date.now() - item.timestamp > 30000) {
                 console.log('⚠️ 消息已过期，跳过发送');
                 continue;
             }
 
             try {
-                // 检查连接状态
                 if (!isConnected) {
                     console.log('⚠️ 连接断开，消息重新入队');
-                    this.messageQueue.unshift(messageItem);
+                    this.messageQueue.unshift(item);
                     break;
                 }
 
-                this.sendingMessages.add(messageItem.messageKey);
-                
-                const result = await client.sendMessage(messageItem.chat.id._serialized, messageItem.message);
-                
-                if (result && result.id) {
-                    // console.log('✅ 消息发送成功，消息ID:', result.id._serialized);
-                    messageStats.processedMessages++;
-                } else {
-                    // console.log('✅ 消息发送成功（无返回ID）');
-                    messageStats.processedMessages++;
-                }
+                this.sendingMessages.add(item.messageKey);
 
-                // 添加处理延迟，防止消息发送过快
+                // ✅ 关键修复：关闭 sendSeen，避免触发 markedUnread 崩溃
+                const result = await client.sendMessage(
+                    item.chatId,
+                    item.message,
+                    { sendSeen: false, ...item.options }
+                );
+
+                messageStats.processedMessages++;
                 await this.delay(this.processingDelay);
-                
+
             } catch (error) {
                 console.error('❌ 消息发送错误:', error.message);
                 messageStats.failedMessages++;
-                
-                // 重试机制
-                if (messageItem.retries < messageItem.maxRetries) {
-                    messageItem.retries++;
-                    console.log(`🔄 重试发送消息 (${messageItem.retries}/${messageItem.maxRetries})`);
-                    this.messageQueue.unshift(messageItem);
-                    await this.delay(1000 * messageItem.retries); // 递增延迟
+
+                if (item.retries < item.maxRetries) {
+                    item.retries++;
+                    console.log(`🔄 重试发送消息 (${item.retries}/${item.maxRetries})`);
+                    this.messageQueue.unshift(item);
+                    await this.delay(1000 * item.retries);
                 }
             } finally {
-                this.sendingMessages.delete(messageItem.messageKey);
+                this.sendingMessages.delete(item.messageKey);
             }
         }
 
         this.isProcessingQueue = false;
-        // console.log('📤 消息队列处理完成');
     }
 
     static getMessageKey(chatId, message) {
@@ -389,10 +376,17 @@ class AdminManager2 {
             const safeUserName = userName || '';
             const safeUserId = userId || '';
             
+            // 标准化处理：移除 @c.us、@lid 等后缀
+            const normalizedUserName = safeUserName.replace(/@[^.]+\.us$/, '').replace(/@lid$/, '');
+            const normalizedUserId = safeUserId.replace(/@[^.]+\.us$/, '').replace(/@lid$/, '');
+            const normalizedAdmin = admin.replace(/@[^.]+\.us$/, '').replace(/@lid$/, '');
+            
             return admin === userName || 
                    admin === userId || 
-                   admin === safeUserName.replace('@c.us', '') ||
-                   admin === safeUserId.replace('@c.us', '');
+                   admin === normalizedUserName ||
+                   admin === normalizedUserId ||
+                   normalizedAdmin === normalizedUserName ||
+                   normalizedAdmin === normalizedUserId;
         });
     }
 
@@ -1182,6 +1176,12 @@ class BotStartupManager {
             takeoverTimeoutMs: 0
         });
 
+        // ✅ 全局兜底：任何 sendMessage 默认不 sendSeen
+        const rawSendMessage = client.sendMessage.bind(client);
+        client.sendMessage = (chatId, content, options = {}) => {
+            return rawSendMessage(chatId, content, { sendSeen: false, ...options });
+        };
+
         console.log('✅ 客户端初始化完成');
     }
 
@@ -1197,17 +1197,30 @@ class BotStartupManager {
             messageStats.totalMessages++;
 
             const chat = await msg.getChat();
-            // const contact = await msg.getContact();
             
-            // const userInfo = {
-            //     name: contact.pushname || contact.number,
-            //     id: contact.id._serialized
-            // };
-            const senderId = msg.author || msg.from;
-
+            // ✅ 安全获取联系人信息，兼容新版本 WhatsApp Web
+            let contact = null;
+            try {
+                contact = await msg.getContact();
+            } catch (error) {
+                console.log('⚠️ getContact() 失败，使用备用方案:', error.message);
+            }
+            
+            const senderID = msg.author || msg.from;
+            
+            // ✅ 提取用户 ID，优先使用 contact.number，否则清理 senderID 中的后缀
+            let userId = contact?.number;
+            if (!userId && senderID) {
+                userId = senderID.replace(/@[^.]+\.us$/, '').replace(/@lid$/, '');
+            }
+            if (!userId) {
+                userId = senderID || "Unknown";
+            }
+            
             const userInfo = {
-                id: senderId,
-                name: msg._data.notifyName || msg._data.notify || "Unknown"
+                name: contact?.pushname || contact?.name || msg._data.notifyName || msg._data.notify || "Unknown",
+                id: userId,   // ✅ 优先用 number，更稳定
+                rawId: senderID                   // 可留作调试
             };
 
             // 输出获取到的消息信息
