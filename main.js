@@ -74,6 +74,20 @@ app.whenReady().then(() => {
 });
 
 // 当所有窗口关闭时退出应用
+let isQuitting = false;
+app.on('before-quit', async (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    isQuitting = true;
+    try {
+        await bot.flushAndShutdown();
+    } catch (error) {
+        console.error('退出前清理失败:', error.message);
+    } finally {
+        app.exit(0);
+    }
+});
+
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
         app.quit();

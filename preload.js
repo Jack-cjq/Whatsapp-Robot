@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 日志相关
     requestLogs: () => ipcRenderer.invoke('request-logs'),
     onLogUpdate: (callback) => ipcRenderer.on('log-update', callback),
+    onLogUpdateBatch: (callback) => ipcRenderer.on('log-update-batch', callback),
     
     // 配置相关
     requestConfig: () => ipcRenderer.invoke('request-config'),

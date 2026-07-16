@@ -61,10 +61,17 @@ function switchTab(tabName) {
 
 // 设置事件监听器
 function setupEventListeners() {
-    // 日志更新监听
+    // 日志批量更新（每批字符串数组）
+    if (window.electronAPI && window.electronAPI.onLogUpdateBatch) {
+        window.electronAPI.onLogUpdateBatch((event, logLines) => {
+            addLogEntries(Array.isArray(logLines) ? logLines : [logLines]);
+        });
+    }
+
+    // 兼容旧单行事件
     if (window.electronAPI && window.electronAPI.onLogUpdate) {
         window.electronAPI.onLogUpdate((event, logText) => {
-            addLogEntry(logText);
+            addLogEntries([logText]);
         });
     }
 
@@ -304,13 +311,20 @@ function displayLogs(logData) {
     });
 }
 
-// 添加日志条目
+// 添加日志条目（最多保留 500 行）
 function addLogEntry(logText) {
-    logs.unshift(logText);
-    if (logs.length > 100) {
-        logs = logs.slice(0, 100);
+    addLogEntries([logText]);
+}
+
+function addLogEntries(logLines) {
+    if (!logLines || !logLines.length) return;
+    for (let i = logLines.length - 1; i >= 0; i--) {
+        logs.unshift(logLines[i]);
     }
-    
+    if (logs.length > 500) {
+        logs = logs.slice(0, 500);
+    }
+
     if (currentTab === 'logs') {
         displayLogs(logs);
     }
