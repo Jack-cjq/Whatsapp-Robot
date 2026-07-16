@@ -228,6 +228,26 @@ class Logger2 {
     }
 }
 
+/**
+ * 从消息构造最小聊天上下文，绕过 msg.getChat()/getChatById 与新版 WA Web 的兼容故障。
+ * 仅提供业务侧实际使用的字段：id._serialized / isGroup / name
+ */
+function createChatContextFromMessage(msg) {
+    const chatId = msg.fromMe ? msg.to : msg.from;
+
+    if (!chatId || typeof chatId !== 'string') {
+        return null;
+    }
+
+    return {
+        id: {
+            _serialized: chatId
+        },
+        isGroup: chatId.endsWith('@g.us'),
+        name: chatId
+    };
+}
+
 // 消息发送管理器 - 增强版
 class MessageManager {
     static sendingMessages = new Set();
@@ -1165,11 +1185,7 @@ class BotStartupManager {
                 clientId: 'whatsapp-bot-v2'   // 新增，区分会话
             }),
             puppeteer: puppeteerConfig,
-            // 关键：让 wwebjs 自动拉取兼容的 WA Web 版本
-            webVersionCache: { 
-                type: 'remote',
-                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
-            },
+            // 使用 whatsapp-web.js 默认版本加载/缓存机制（不再固定过旧的 remote html）
             // 关键：多设备/并发登录时，自动接管，避免卡死
             restartOnAuthFail: true,
             takeoverOnConflict: true,
@@ -1196,41 +1212,50 @@ class BotStartupManager {
             // 更新消息统计
             messageStats.totalMessages++;
 
-            const chat = await msg.getChat();
-            
-            // ✅ 安全获取联系人信息，兼容新版本 WhatsApp Web
+            // 绕过 msg.getChat()/getChatById（新版 WA Web 会触发 Error: r: r）
+            const chat = createChatContextFromMessage(msg);
+            if (!chat) {
+                console.warn('⚠️ 消息缺少有效聊天 ID，已跳过');
+                return;
+            }
+
+            // 群聊 ID = msg.from；群内实际发送者 = msg.author（不要把群 ID 当作用户 ID）
+            const senderId = msg.author || msg.from;
+
+            // ✅ 安全获取联系人信息；失败时降级，不阻断记账指令
             let contact = null;
             try {
                 contact = await msg.getContact();
             } catch (error) {
                 console.log('⚠️ getContact() 失败，使用备用方案:', error.message);
             }
-            
-            const senderID = msg.author || msg.from;
-            
-            // ✅ 提取用户 ID，优先使用 contact.number，否则清理 senderID 中的后缀
+
+            // ✅ 提取用户 ID，优先使用 contact.number，否则清理 senderId 中的后缀
             let userId = contact?.number;
-            if (!userId && senderID) {
-                userId = senderID.replace(/@[^.]+\.us$/, '').replace(/@lid$/, '');
+            if (!userId && senderId) {
+                userId = senderId.replace(/@[^.]+\.us$/, '').replace(/@lid$/, '');
             }
             if (!userId) {
-                userId = senderID || "Unknown";
+                userId = senderId || 'Unknown';
             }
-            
+
+            const fallbackName = msg._data?.notifyName || msg._data?.notify || 'Unknown';
             const userInfo = {
-                name: contact?.pushname || contact?.name || msg._data.notifyName || msg._data.notify || "Unknown",
-                id: userId,   // ✅ 优先用 number，更稳定
-                rawId: senderID                   // 可留作调试
+                name: contact?.pushname || contact?.name || fallbackName,
+                id: userId,
+                rawId: senderId
             };
 
-            // 输出获取到的消息信息
+            // 诊断日志（不含会话/认证敏感信息）
             console.log('\n📨 收到新消息:');
-            console.log(`   - 消息内容: "${msg.body}"`);
+            console.log(`   - msgId: ${msg.id?._serialized || 'n/a'}`);
+            console.log(`   - chatId: ${chat.id._serialized}`);
+            console.log(`   - senderId: ${senderId}`);
+            console.log(`   - type: ${msg.type}`);
+            console.log(`   - isGroup: ${chat.isGroup}`);
+            console.log(`   - fromMe: ${!!msg.fromMe}`);
             console.log(`   - 发送者: ${userInfo.name} (${userInfo.id})`);
-            console.log(`   - 群组ID: ${chat.id._serialized}`);
-            console.log(`   - 消息类型: ${msg.type}`);
-            console.log(`   - 时间戳: ${new Date(msg.timestamp * 1000).toLocaleString()}`);
-            console.log(`   - 是否群组: ${chat.isGroup}`);
+            console.log(`   - 消息内容: "${msg.body}"`);
 
             // 检查连接状态
             if (!isConnected) {
@@ -1371,12 +1396,8 @@ class BotStartupManager {
     }
 
     static startHeartbeat() {
-        console.log('💓 启动心跳机制...');
-        if (!heartbeatInterval) {
-            startHeartbeat();
-        } else {
-            console.log('💓 心跳机制已在运行');
-        }
+        // 统一由全局 startHeartbeat() 创建 interval，避免重复日志与重复定时器
+        startHeartbeat();
     }
 
     static completeStartup() {
@@ -1531,6 +1552,10 @@ async function handleDisconnection(reason) {
 
 // 心跳机制
 function startHeartbeat() {
+    if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+    }
     console.log('💓 启动心跳机制...');
     heartbeatInterval = setInterval(() => {
         try {
