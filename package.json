@@ -4,34 +4,82 @@
   "private": true,
   "description": "WhatsApp资金管理机器人 2.0 - 新一代群组资金管理工具",
   "author": "www.chenjiaqi.com@outlook.com",
+  "copyright": "Copyright © 2026",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "start:win": "start.bat",
     "start:demo": "electron start-simple.js",
-    "test": "node test/perf-benchmark.js",
+    "test": "node test/perf-benchmark.js && node test/migration.test.js && node test/reliability.test.js && node test/packaging-config.test.js && node test/packaging-styles.test.js",
     "bench": "node test/perf-benchmark.js",
     "test:legacy": "node test/concurrency.test.js",
-    "build": "electron-builder --win --x64",
-    "build:installer": "electron-builder --win --x64 --publish=never",
-    "dist": "electron-builder --win --x64 --publish=never",
+    "test:migration": "node test/migration.test.js",
+    "test:reliability": "node test/reliability.test.js",
+    "generate:icon": "node scripts/generate-icon.js",
+    "prepare:release": "node scripts/prepare-release-deps.js",
+    "release:win": "powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1",
+    "build": "electron-builder --win nsis portable --x64 --publish=never",
+    "build:installer": "electron-builder --win nsis --x64 --publish=never",
+    "dist": "electron-builder --win nsis portable --x64 --publish=never",
+    "dist:win": "electron-builder --win nsis --x64 --publish=never",
+    "dist:portable": "electron-builder --win portable --x64 --publish=never",
+    "dist:all": "electron-builder --win nsis portable --x64 --publish=never",
     "pack": "electron-builder --dir",
     "dev": "electron . --dev"
   },
   "build": {
     "appId": "com.whatsapp.bot.v2",
     "productName": "WhatsApp资金管理机器人 2.0",
+    "copyright": "Copyright © 2026",
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "assets"
     },
     "files": [
-      "**/*",
+      "main.js",
+      "bot.js",
+      "preload.js",
+      "renderer.js",
+      "index.html",
+      "styles.css",
+      "lib/**/*",
+      "utils/**/*",
+      "config/logging.json",
+      "resources/defaults/**/*",
+      "assets/**/*",
+      "!assets/README.md",
+      "package.json",
+      "node_modules/**/*",
+      "!node_modules/.cache/**/*",
+      "!node_modules/better-sqlite3/**/*",
+      "!node_modules/better-sqlite3.disabled/**/*",
+      "!node_modules/**/{test,tests,docs,doc,example,examples,.github}/**",
+      "!node_modules/**/*.{md,ts,map}",
+      "!**/*.log",
+      "!**/*.db",
+      "!**/*.sqlite",
+      "!**/*.sqlite3",
+      "!**/*.db-wal",
+      "!**/*.db-shm",
+      "!data/**/*",
+      "!logs/**/*",
       "!dist/**/*",
-      "!build/**/*",
+      "!dist-release/**/*",
+      "!.release-stage/**/*",
       "!.git/**/*",
-      "!*.log",
-      "!convert-icon.js",
-      "!data/session/**/*"
+      "!vendor/**/*",
+      "!test/**/*",
+      "!test-out*.txt",
+      "!scripts/**/*",
+      "!*.md",
+      "!.wwebjs_cache/**/*",
+      "!migration-v2.json",
+      "!patches/**/*",
+      "!**/*.patch"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/node_modules/whatsapp-web.js/**"
     ],
     "win": {
       "target": [
@@ -40,57 +88,37 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "assets/icon.ico",
-      "requestedExecutionLevel": "requireAdministrator"
+      "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": false,
       "allowToChangeInstallationDirectory": true,
+      "allowElevation": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "WhatsApp资金管理机器人 2.0",
+      "uninstallDisplayName": "WhatsApp资金管理机器人 2.0",
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "installerHeaderIcon": "assets/icon.ico",
       "deleteAppDataOnUninstall": false,
-      "include": "installer.nsh"
+      "artifactName": "WhatsApp-Fund-Robot-${version}-${arch}-Setup.${ext}"
     },
-    "extraFiles": [
-      {
-        "from": "data",
-        "to": "data",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "logs",
-        "to": "logs",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "assets",
-        "to": "assets",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ],
-    "extraResources": [
-      {
-        "from": "data",
-        "to": "data"
-      },
-      {
-        "from": "logs",
-        "to": "logs"
-      }
-    ],
-    "asar": false
+    "portable": {
+      "artifactName": "WhatsApp-Fund-Robot-${version}-${arch}-Portable.${ext}"
+    }
   },
   "dependencies": {
     "lodash": "^4.17.21",
@@ -105,6 +133,7 @@
     "node": ">=18"
   },
   "devDependencies": {
-    "electron": "^43.1.1"
+    "electron": "^43.1.1",
+    "electron-builder": "^25.1.8"
   }
 }

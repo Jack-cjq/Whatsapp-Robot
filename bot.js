@@ -4,14 +4,10 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const path = require('path');
-const math = require('mathjs');
 const moment = require('moment');
-const _ = require('lodash');
 const {
     classifyCommand,
-    CMD,
     isSupportedBotCommand,
-    isMathExpression,
     MessageDeduper,
     ContactNameCache,
     FairGroupScheduler,
@@ -19,17 +15,31 @@ const {
     OutboundMessageQueue,
     RuntimeMetrics,
     MemoryAccessControl,
-    LatencyRegistry,
-    normalizeId
+    LatencyRegistry
 } = require('./lib/runtime-core');
 const { JsonCapitalStore } = require('./lib/json-capital-store');
 const { CommandEngine } = require('./lib/command-engine');
+const { DEFAULT_CONFIG, ConfigFileStore } = require('./lib/config-store');
+const { createBotAdapters } = require('./lib/bot-adapters');
+const {
+    findEdgePath,
+    findChromePath,
+    listBrowserCandidates,
+    prepareBrowserProfileDir,
+    isBrowserLaunchError,
+    buildPuppeteerConfig,
+    sleep
+} = require('./lib/browser-runtime');
+const { createMessageIngressHandler } = require('./lib/message-ingress');
+const { WhatsappBridgeWatchdog } = require('./lib/whatsapp-bridge-health');
 
 if (process.platform === 'win32') {
     try {
         require('child_process').execSync('chcp 65001', { stdio: 'ignore' });
         console.log('✅ 控制台编码已设置为 UTF-8');
-    } catch (_) {}
+    } catch (error) {
+        console.warn('⚠️ 无法切换控制台编码:', error.message);
+    }
 }
 
 process.stdout.setDefaultEncoding('utf8');
@@ -40,13 +50,20 @@ let DATA_DIR = path.join(__dirname, 'data');
 let CAPITAL_DATA_PATH = path.join(DATA_DIR, 'capital.json');
 let CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 let LOG_DIR = path.join(DATA_DIR, 'logs');
+let BACKUP_DIR = path.join(DATA_DIR, 'backups');
+let SESSION_DATA_PATH = DATA_DIR;
+let runtimePathsRef = null;
+let migrationBlocked = false;
+let browserMissing = false;
 let mainWindow = null;
 let client = null;
 let isConnected = false;
 let reconnectAttempts = 0;
 const maxReconnectAttempts = 5;
 const reconnectDelay = 5000;
-let heartbeatInterval = null;
+let reconnectTimer = null;
+let reconnectInFlight = false;
+let shuttingDown = false;
 let lastHeartbeat = Date.now();
 let metricsTimerStarted = false;
 let capitalReady = false;
@@ -72,204 +89,55 @@ const runtimeMetrics = new RuntimeMetrics();
 const accessControl = new MemoryAccessControl();
 const contactCache = new ContactNameCache();
 const latencyRegistry = new LatencyRegistry();
+const bridgeWatchdog = new WhatsappBridgeWatchdog({ intervalMs: 15000 });
+const configStore = new ConfigFileStore({
+    getFilePath: () => CONFIG_PATH,
+    defaults: DEFAULT_CONFIG
+});
 
 class ConfigManager {
-    static defaultConfig = {
-        version: '2.0.0',
-        adminIds: ['你的用户名'],
-        allowedGroupIds: [],
-        maxConcurrentGroups: 8,
-        autoBackup: true,
-        backupInterval: 24,
-        maxHistoryRecords: 1000,
-        cleanupDays: 30,
-        enableNotifications: true,
-        language: 'zh-CN',
-        theme: 'default'
-    };
-
-    static cache = null;
+    static defaultConfig = DEFAULT_CONFIG;
 
     static getConfig() {
-        if (this.cache) return this.cache;
-        try {
-            if (fs.existsSync(CONFIG_PATH)) {
-                const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-                this.cache = _.merge({}, this.defaultConfig, config);
-                return this.cache;
-            }
-        } catch (error) {
-            console.error('读取配置文件失败:', error);
-        }
-        this.cache = { ...this.defaultConfig };
-        return this.cache;
+        return configStore.getConfig();
     }
 
-    static saveConfig(config) {
-        try {
-            fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
-            this.cache = _.merge({}, this.defaultConfig, config);
-            this.hydrateAccessControl();
-            return true;
-        } catch (error) {
-            console.error('保存配置文件失败:', error);
-            return false;
-        }
+    static saveConfig(configPatch) {
+        const saved = configStore.savePatch(configPatch);
+        this.hydrateAccessControl();
+        return saved;
+    }
+
+    static reset() {
+        configStore.reset();
     }
 
     static hydrateAccessControl() {
         const cfg = this.getConfig();
         accessControl.replaceAdmins(cfg.adminIds || []);
         accessControl.replaceAllowedGroups(cfg.allowedGroupIds || []);
-        if (cfg.maxConcurrentGroups) {
+        if (cfg.maxConcurrentGroups !== undefined) {
             groupCommandScheduler.maxConcurrentGroups = cfg.maxConcurrentGroups;
         }
     }
 }
 
-class Logger2 {
-    static write(d) { asyncLogger.write(d); }
-    static system(e, d) { asyncLogger.system(e, d); }
-    static operation(g, a, u, c) { asyncLogger.operation(g, a, u, c); }
-    static error(e, c) { asyncLogger.error(e, c); }
-    static warn(m, c) { asyncLogger.warn(m, c); }
-    static info(e, d) { asyncLogger.info(e, d); }
-    static debug(e, d) { asyncLogger.debug(e, d); }
-    static async flush() { return asyncLogger.flush(); }
-}
-
-class CapitalManager2 {
-    static async getCapital(groupId) {
-        const q = await capitalStore.query(groupId, 1);
-        return {
-            capital: q.balance || 0,
-            history: q.history || [],
-            statistics: { totalOperations: ((q.history || []).length) }
-        };
-    }
-
-    static async getHistory(groupId, limit = 10) {
-        const q = await capitalStore.query(groupId, limit);
-        return q.history || [];
-    }
-
-    static getData() {
-        return capitalStore.getData() || { _description: '资金管理配置文件 2.0' };
-    }
-
-    static async flush() {
-        return capitalStore.flush();
-    }
-}
-
-class MessageManager {
-    static async sendMessage(chat, message, options = {}) {
-        const chatId = typeof chat === 'string' ? chat : chat.id._serialized;
-        return outboundQueue.enqueue(chatId, message, { critical: true, ...options });
-    }
-
-    static getMessageStats() {
-        return messageStats;
-    }
-
-    static getQueueStatus() {
-        return outboundQueue.getQueueStatus();
-    }
-}
-
-class AdminManager2 {
-    static getAdminList() {
-        return ConfigManager.getConfig().adminIds || [];
-    }
-
-    static isAdmin(userName, userId) {
-        if (accessControl.isAdmin(userId, userName)) return true;
-        const adminList = this.getAdminList();
-        if (!adminList.length) return false;
-        const nName = normalizeId(userName).toLowerCase();
-        const nId = normalizeId(userId).toLowerCase();
-        return adminList.some((admin) => {
-            const nAdmin = normalizeId(admin).toLowerCase();
-            return admin === userName || admin === userId || nAdmin === nName || nAdmin === nId;
-        });
-    }
-}
-
-class MathValidator {
-    static validateExpression(expression) {
-        const dangerousFunctions = ['eval', 'Function', 'constructor', 'prototype'];
-        if (dangerousFunctions.some((func) => expression.includes(func))) {
-            throw new Error('表达式包含不允许的函数');
-        }
-        if (expression.length > 1000) throw new Error('表达式过长');
-        if (!/^[0-9+\-*/×÷()., \t\n\r]+$/.test(expression)) {
-            throw new Error('表达式包含不允许的字符');
-        }
-        return true;
-    }
-
-    static safeEvaluate(expression) {
-        this.validateExpression(expression);
-        const normalized = expression.replace(/×/g, '*').replace(/÷/g, '/');
-        const result = math.evaluate(normalized);
-        if (!isFinite(result)) throw new Error('计算结果无效');
-        return parseFloat(result.toFixed(4));
-    }
-}
-
-class CommandProcessor {
-    static async handleCommand(chat, message, userInfo) {
-        const groupId = typeof chat === 'string' ? chat : chat.id._serialized;
-        const text = (message && message.body ? message.body : '').trim();
-        const classified = classifyCommand(text);
-        if (classified.type === CMD.IGNORE) return;
-        const dto = Object.freeze({
-            messageId: (message && message.id && message.id._serialized) || `legacy-${Date.now()}`,
-            chatId: groupId,
-            senderId: (userInfo && (userInfo.rawId || userInfo.id)) || '',
-            body: text,
-            type: (message && message.type) || 'chat',
-            timestamp: (message && message.timestamp) || Math.floor(Date.now() / 1000),
-            receivedAtNs: process.hrtime.bigint(),
-            isGroup: String(groupId).endsWith('@g.us')
-        });
-        return commandEngine.handle(dto, classified);
-    }
-
-    static isMathExpression(text) {
-        return isMathExpression(text);
-    }
-}
-
-function findEdgePath() {
-    const possiblePaths = [
-        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-        'C:\\Users\\' + process.env.USERNAME + '\\AppData\\Local\\Microsoft\\Edge\\Application\\msedge.exe'
-    ];
-    for (const p of possiblePaths) {
-        if (fs.existsSync(p)) {
-            console.log('✅ 找到Edge浏览器:', p);
-            return p;
-        }
-    }
-    return null;
-}
-
-function findChromePath() {
-    const possiblePaths = [
-        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Users\\' + process.env.USERNAME + '\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe'
-    ];
-    for (const p of possiblePaths) {
-        if (fs.existsSync(p)) {
-            console.log('✅ 找到Chrome浏览器:', p);
-            return p;
-        }
-    }
-    return null;
-}
+const {
+    Logger2,
+    CapitalManager2,
+    MessageManager,
+    AdminManager2,
+    MathValidator,
+    CommandProcessor
+} = createBotAdapters({
+    asyncLogger,
+    capitalStore,
+    outboundQueue,
+    getMessageStats: () => messageStats,
+    getConfig: () => ConfigManager.getConfig(),
+    accessControl,
+    getCommandEngine: () => commandEngine
+});
 
 function startRuntimeMetricsIfNeeded() {
     if (metricsTimerStarted) return;
@@ -317,8 +185,10 @@ async function ensureCapitalStack() {
 
     capitalStore.configure({
         filePath: CAPITAL_DATA_PATH,
-        backupDir: path.join(DATA_DIR, 'backups'),
+        backupDir: BACKUP_DIR,
         getMaxHistory: () => ConfigManager.getConfig().maxHistoryRecords || 1000,
+        isAutoBackupEnabled: () => ConfigManager.getConfig().autoBackup === true,
+        getBackupIntervalHours: () => ConfigManager.getConfig().backupInterval,
         mergeWaitMs: 3,
         latency: latencyRegistry
     });
@@ -339,19 +209,56 @@ async function ensureCapitalStack() {
 }
 
 function init(config) {
-    if (config && config.dataDir) {
-        DATA_DIR = config.dataDir;
-        CAPITAL_DATA_PATH = path.join(DATA_DIR, 'capital.json');
-        CONFIG_PATH = path.join(DATA_DIR, 'config.json');
-        LOG_DIR = path.join(DATA_DIR, 'logs');
-    }
-    [DATA_DIR, LOG_DIR].forEach((dir) => {
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!config) return;
+    runtimePathsRef = config;
+
+    if (config.dataDir) DATA_DIR = config.dataDir;
+    if (config.capitalPath) CAPITAL_DATA_PATH = config.capitalPath;
+    else if (config.dataDir) CAPITAL_DATA_PATH = path.join(config.dataDir, 'capital.json');
+
+    if (config.configPath) CONFIG_PATH = config.configPath;
+    else if (config.configDir) CONFIG_PATH = path.join(config.configDir, 'config.json');
+    else if (config.dataDir) CONFIG_PATH = path.join(config.dataDir, 'config.json');
+
+    if (config.logsDir) LOG_DIR = config.logsDir;
+    else if (config.dataDir) LOG_DIR = path.join(config.dataDir, 'logs');
+
+    if (config.backupDir) BACKUP_DIR = config.backupDir;
+    else if (config.dataDir) BACKUP_DIR = path.join(config.dataDir, 'backups');
+
+    if (config.sessionDataPath) SESSION_DATA_PATH = config.sessionDataPath;
+    else SESSION_DATA_PATH = DATA_DIR;
+
+    if (config.migrationBlocked) migrationBlocked = true;
+    ConfigManager.reset();
+
+    [DATA_DIR, LOG_DIR, BACKUP_DIR, path.dirname(CONFIG_PATH)].forEach((dir) => {
+        if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     });
     if (!fs.existsSync(CONFIG_PATH)) {
         ConfigManager.saveConfig(ConfigManager.defaultConfig);
     }
     ConfigManager.hydrateAccessControl();
+}
+
+function setMigrationBlocked(blocked, reason) {
+    migrationBlocked = !!blocked;
+    if (blocked) {
+        console.error('❌ 数据迁移失败，资金写入已禁用:', reason || '');
+        Logger2.error(new Error(reason || 'migration failed'), { context: 'migration' });
+    }
+}
+
+function getRuntimePaths() {
+    return runtimePathsRef;
+}
+
+function getBrowserStatus() {
+    return {
+        edge: findEdgePath(),
+        chrome: findChromePath(),
+        missing: browserMissing
+    };
 }
 
 class BotStartupManager {
@@ -386,6 +293,10 @@ class BotStartupManager {
             this.startupStartTime = Date.now();
             this.startupProgress = 0;
 
+            if (migrationBlocked) {
+                throw new Error('数据迁移失败，请检查用户数据目录与旧 data，修复后再启动');
+            }
+
             await this.performEnvironmentCheck();
             this.updateProgress(1);
 
@@ -395,13 +306,7 @@ class BotStartupManager {
             await ensureCapitalStack();
             this.updateProgress(3);
 
-            await this.initializeClient();
-            this.updateProgress(4);
-
-            this.setupEventListeners();
-            this.updateProgress(5);
-
-            await this.startClient();
+            await this.launchWhatsAppWithRetry();
             this.updateProgress(6);
 
             this.startHeartbeat();
@@ -416,6 +321,60 @@ class BotStartupManager {
         } catch (error) {
             await this.handleStartupError(error);
         }
+    }
+
+    /**
+     * 首次启动 Edge/Chrome 偶发 “Failed to launch … Code: 0”
+     * 清理锁文件后重试，并在 Edge 失败时回退 Chrome。
+     */
+    static async launchWhatsAppWithRetry() {
+        const browsers = listBrowserCandidates();
+        browserMissing = browsers.length === 0;
+        if (browserMissing) {
+            throw new Error('未检测到 Microsoft Edge 或 Google Chrome，请安装后再启动');
+        }
+
+        let lastError = null;
+        for (let bi = 0; bi < browsers.length; bi++) {
+            const browserPath = browsers[bi];
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    console.log(
+                        `🔧 启动浏览器 (${bi + 1}/${browsers.length}) 尝试 ${attempt}/3: ${browserPath}`
+                    );
+                    prepareBrowserProfileDir(SESSION_DATA_PATH);
+                    await this.initializeClient(browserPath);
+                    this.updateProgress(4);
+                    this.setupEventListeners();
+                    this.updateProgress(5);
+                    await this.startClient();
+                    console.log('✅ WhatsApp 浏览器已启动:', browserPath);
+                    return;
+                } catch (error) {
+                    lastError = error;
+                    console.warn(`⚠️ 浏览器启动失败: ${error.message}`);
+                    try {
+                        if (client) await client.destroy();
+                    } catch (destroyError) {
+                        console.warn('⚠️ 清理启动失败的客户端时出错:', destroyError.message);
+                    }
+                    client = null;
+                    isConnected = false;
+
+                    if (!isBrowserLaunchError(error)) {
+                        throw error;
+                    }
+                    prepareBrowserProfileDir(SESSION_DATA_PATH);
+                    await sleep(800 * attempt);
+                }
+            }
+            console.warn('⚠️ 当前浏览器连续失败，尝试下一个候选…');
+        }
+
+        const detail = lastError ? lastError.message : 'unknown';
+        throw new Error(
+            `无法启动用于 WhatsApp 的浏览器（已重试 Edge/Chrome）。${detail}`
+        );
     }
 
     static async performEnvironmentCheck() {
@@ -440,29 +399,31 @@ class BotStartupManager {
         console.log(`✅ capital.json 模式, maxConcurrentGroups=${groupCommandScheduler.maxConcurrentGroups}`);
     }
 
-    static async initializeClient() {
-        console.log('🔧 初始化客户端...');
-        const chromePath = findChromePath();
-        const edgePath = !chromePath ? findEdgePath() : null;
-        const browserPath = chromePath || edgePath;
-        const puppeteerConfig = {
-            headless: false,
-            executablePath: browserPath || undefined,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-extensions',
-                '--no-first-run',
-                '--window-size=1280,720'
-            ],
-            timeout: 120000,
-            protocolTimeout: 120000
-        };
+    static async initializeClient(browserPath) {
+        console.log('🔧 初始化客户端...', browserPath || '');
+        const resolvedPath = browserPath || listBrowserCandidates()[0] || null;
+        browserMissing = !resolvedPath;
+        if (browserMissing) {
+            console.error('❌ 未找到 Microsoft Edge 或 Google Chrome，WhatsApp 无法启动浏览器');
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                try {
+                    mainWindow.webContents.send('browser-missing', {
+                        message: '未检测到 Microsoft Edge 或 Google Chrome，请安装后再启动'
+                    });
+                } catch (notifyError) {
+                    console.warn('⚠️ 无法向界面发送浏览器缺失提示:', notifyError.message);
+                }
+            }
+        } else {
+            console.log('✅ 使用浏览器:', resolvedPath);
+        }
+
+        prepareBrowserProfileDir(SESSION_DATA_PATH);
+        const puppeteerConfig = buildPuppeteerConfig(resolvedPath);
 
         client = new Client({
             authStrategy: new LocalAuth({
-                dataPath: DATA_DIR,
+                dataPath: SESSION_DATA_PATH,
                 clientId: 'whatsapp-bot-v2'
             }),
             puppeteer: puppeteerConfig,
@@ -493,67 +454,18 @@ class BotStartupManager {
     static setupEventListeners() {
         console.log('👂 设置事件监听器...');
 
-        // 极轻量回调：无 await / 无 Puppeteer / 无 fs / 不持有 msg
-        client.on('message', (msg) => {
-            const receivedAtNs = process.hrtime.bigint();
-            try {
-                messageStats.totalMessages++;
-                if (msg.fromMe) return;
-
-                const messageId = msg.id && msg.id._serialized ? msg.id._serialized : null;
-                const chatId = msg.from;
-                const senderId = msg.author || msg.from;
-                const body = typeof msg.body === 'string' ? msg.body : '';
-                const type = msg.type;
-                const timestamp = msg.timestamp;
-                // 同步读取推送名（不调用 getContact），用于管理员名称匹配
-                const notifyName =
-                    (msg._data && (msg._data.notifyName || msg._data.notify)) || '';
-
-                if (!chatId || typeof chatId !== 'string') return;
-                if (messageDeduper.isDuplicate(messageId)) return;
-
-                const classified = classifyCommand(body);
-                if (classified.type === CMD.IGNORE) {
-                    groupCommandScheduler.droppedNonCommandCount++;
-                    return;
-                }
-
-                if (!isConnected || !capitalReady || !commandEngine) return;
-
-                const dto = Object.freeze({
-                    messageId,
-                    chatId,
-                    senderId,
-                    notifyName: typeof notifyName === 'string' ? notifyName : '',
-                    body,
-                    type,
-                    timestamp,
-                    receivedAtNs,
-                    isGroup: chatId.endsWith('@g.us')
-                });
-
-                const enqueuedAtNs = process.hrtime.bigint();
-                latencyRegistry.record(
-                    'receiveToEnqueueMs',
-                    LatencyRegistry.nsToMs(receivedAtNs, enqueuedAtNs)
-                );
-
-                const ok = groupCommandScheduler.enqueue(dto.chatId, {
-                    enqueuedAtNs,
-                    run: async () => {
-                        const result = await commandEngine.handle(dto, classified);
-                        const localTotalMs = LatencyRegistry.nsToMs(dto.receivedAtNs);
-                        latencyRegistry.record('localTotalMs', localTotalMs);
-                        latencyRegistry.record('endToEndObservedMs', localTotalMs);
-                        return result;
-                    }
-                });
-                if (!ok) Logger2.warn('OVERLOAD_REJECT', { chatId });
-            } catch (error) {
-                Logger2.error(error, { context: 'message_preprocessor' });
-            }
-        });
+        // 极轻量回调：无 await / 无 Puppeteer / 无 fs / 不持有 Message 实例
+        client.on(
+            'message',
+            createMessageIngressHandler({
+                messageStats,
+                messageDeduper,
+                groupCommandScheduler,
+                latencyRegistry,
+                logger: Logger2,
+                getRuntimeState: () => ({ isConnected, capitalReady, commandEngine })
+            })
+        );
 
         client.on('auth_failure', (msg) => {
             console.error('❌ WhatsApp 身份验证失败:', msg);
@@ -589,11 +501,19 @@ class BotStartupManager {
             console.log('✅ WhatsApp 客户端已准备就绪');
             isConnected = true;
             reconnectAttempts = 0;
+            reconnectInFlight = false;
+            lastHeartbeat = Date.now();
             this.currentState = this.startupStates.READY;
             try {
                 const wwebVersion = await client.getWWebVersion();
                 console.log(`📱 WhatsApp Web 版本: ${wwebVersion}`);
-            } catch (_) {}
+            } catch (error) {
+                console.warn('无法读取 WhatsApp Web 版本:', error.message);
+            }
+            startHeartbeat();
+            outboundQueue.resume().catch((error) => {
+                Logger2.error(error, { context: 'outbound_resume_after_ready' });
+            });
             console.log('🤖 机器人现在可以接收和处理消息了！');
             Logger2.system('CLIENT_READY', {});
         });
@@ -650,17 +570,21 @@ class BotStartupManager {
                     currentStep: this.startupSteps[step - 1],
                     totalSteps: this.startupSteps.length
                 });
-            } catch (_) {}
+            } catch (notifyError) {
+                console.warn('⚠️ 无法向界面发送启动进度:', notifyError.message);
+            }
         }
     }
 }
 
 function startBot() {
+    shuttingDown = false;
     return BotStartupManager.startBot();
 }
 
 async function handleDisconnection(reason) {
     console.log(`🔌 处理断开连接: ${reason}`);
+    if (shuttingDown || reconnectTimer || reconnectInFlight) return;
     if (reconnectAttempts >= maxReconnectAttempts) {
         console.error('❌ 达到最大重连次数，停止重连');
         return;
@@ -668,54 +592,63 @@ async function handleDisconnection(reason) {
     reconnectAttempts++;
     const delay = reconnectDelay * reconnectAttempts;
     console.log(`🔄 ${reconnectAttempts}/${maxReconnectAttempts}，${delay}ms 后重建客户端...`);
-    setTimeout(async () => {
+    reconnectTimer = setTimeout(async () => {
+        reconnectTimer = null;
+        reconnectInFlight = true;
         try {
             if (client) {
                 try {
                     await client.destroy();
-                } catch (_) {}
+                } catch (error) {
+                    console.warn('重连前关闭旧客户端失败:', error.message);
+                }
             }
             await BotStartupManager.initializeClient();
             BotStartupManager.setupEventListeners();
             await BotStartupManager.startClient();
         } catch (error) {
             console.error('❌ 重连失败:', error);
-            handleDisconnection(reason);
+            reconnectInFlight = false;
+            await handleDisconnection(reason);
+            return;
         }
+        reconnectInFlight = false;
     }, delay);
 }
 
 function startHeartbeat() {
-    if (heartbeatInterval) {
-        clearInterval(heartbeatInterval);
-        heartbeatInterval = null;
-    }
-    console.log('💓 启动心跳机制...');
-    heartbeatInterval = setInterval(() => {
-        try {
-            if (client && isConnected) lastHeartbeat = Date.now();
-        } catch (error) {
-            console.error('💔 心跳检测失败:', error);
+    console.log('💓 启动 WhatsApp 消息桥接健康检查...');
+    bridgeWatchdog.start({
+        getClient: () => client,
+        isConnected: () => isConnected,
+        onHealthy: () => {
+            lastHeartbeat = Date.now();
+        },
+        onUnhealthy: async (error) => {
+            Logger2.error(error, {
+                context: 'whatsapp_bridge_watchdog',
+                code: error.code,
+                bridgeState: error.bridgeState
+            });
             isConnected = false;
-            handleDisconnection('heartbeat_failed');
+            BotStartupManager.currentState = BotStartupManager.startupStates.ERROR;
+            stopHeartbeat();
+            await handleDisconnection('message_bridge_lost');
         }
-    }, 30000);
+    });
 }
 
 function stopHeartbeat() {
-    if (heartbeatInterval) {
-        clearInterval(heartbeatInterval);
-        heartbeatInterval = null;
-        console.log('💓 心跳机制已停止');
-    }
+    if (bridgeWatchdog.stop()) console.log('💓 WhatsApp 消息桥接健康检查已停止');
 }
 
 function getConnectionStatus() {
+    const startedAt = BotStartupManager.startupStartTime || Date.now();
     return {
         isConnected,
         reconnectAttempts,
         lastHeartbeat,
-        uptime: Date.now() - lastHeartbeat
+        uptime: Math.max(0, Date.now() - startedAt)
     };
 }
 
@@ -728,20 +661,45 @@ function setMainWindow(window) {
 }
 
 async function flushAndShutdown() {
+    shuttingDown = true;
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+    const deadline = Date.now() + 20000;
     try {
-        await outboundQueue.drain(10000);
-    } catch (_) {}
+        capitalReady = false;
+        await outboundQueue.drain(Math.max(1000, deadline - Date.now()));
+    } catch (error) {
+        console.warn('⚠️ 关闭时等待出站队列失败:', error.message);
+    }
     try {
         await capitalStore.flush();
-    } catch (_) {}
+    } catch (error) {
+        console.warn('⚠️ 关闭时刷新账本失败:', error.message);
+    }
     try {
         await Logger2.flush();
         await asyncLogger.close();
-    } catch (_) {}
+    } catch (error) {
+        console.warn('⚠️ 关闭时刷新日志失败:', error.message);
+    }
     try {
         await capitalStore.close();
-    } catch (_) {}
-    capitalReady = false;
+    } catch (error) {
+        console.warn('⚠️ 关闭账本存储失败:', error.message);
+    }
+    try {
+        if (client) {
+            await Promise.race([
+                client.destroy(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('destroy timeout')), 8000))
+            ]);
+        }
+    } catch (e) {
+        console.warn('关闭 WhatsApp 客户端:', e.message);
+    }
+    client = null;
     runtimeMetrics.stop();
     stopHeartbeat();
 }
@@ -753,6 +711,9 @@ module.exports = {
     getConnectionStatus,
     getMessageStats,
     flushAndShutdown,
+    setMigrationBlocked,
+    getRuntimePaths,
+    getBrowserStatus,
     ConfigManager,
     CapitalManager2,
     Logger2,

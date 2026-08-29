@@ -732,4 +732,50 @@ body {
     color: #ddd;
 }
 
+@keyframes slideIn {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+
+.notification {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 1000;
+    max-width: 300px;
+    padding: 15px 20px;
+    color: white;
+    background: #667eea;
+    border-radius: 8px;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+    animation: slideIn 0.3s ease;
+}
+
+.notification-success { background: #51cf66; }
+.notification-warning { background: #ffd43b; }
+.notification-error { background: #ff6b6b; }
+.notification-content { display: flex; align-items: center; justify-content: space-between; }
+.notification-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+.notification-close {
+    margin-left: 10px;
+    color: white;
+    font-size: 18px;
+    cursor: pointer;
+    background: none;
+    border: none;
+}
+
+/* 无障碍：对读屏可见、视觉隐藏的标签 */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 

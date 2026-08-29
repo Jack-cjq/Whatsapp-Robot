@@ -1,86 +1,196 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+'use strict';
+
+const { app, BrowserWindow, ipcMain, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const bot = require('./bot.js');
+const { buildRuntimePaths } = require('./lib/runtime-paths');
+const {
+    migrateLegacyData,
+    ensureFreshCapital,
+    ensureFreshConfig
+} = require('./lib/migrate-legacy');
 
-// 控制台编码设置
 if (process.platform === 'win32') {
     try {
         require('child_process').execSync('chcp 65001', { stdio: 'ignore' });
-            // console.log('✅ 主进程控制台编码已设置为 UTF-8');
-} catch (error) {
-    // console.log('⚠️ 设置控制台编码失败，但不影响程序运行');
-}
+    } catch (error) {
+        console.warn('[ConsoleEncoding] 无法切换到 UTF-8:', error.message);
+    }
 }
 
 process.stdout.setDefaultEncoding('utf8');
 process.stderr.setDefaultEncoding('utf8');
 
-let mainWindow;
+let mainWindow = null;
+let runtimePaths = null;
+let migrationResult = null;
+let isQuitting = false;
+let bootError = null;
+
+// 单实例
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+    app.quit();
+} else {
+    app.on('second-instance', () => {
+        if (mainWindow) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.focus();
+        }
+    });
+}
+
+function resolveIcon() {
+    const ico = path.join(__dirname, 'assets', 'icon.ico');
+    if (fs.existsSync(ico)) return ico;
+    return undefined;
+}
+
+async function prepareRuntime() {
+    runtimePaths = buildRuntimePaths(app);
+    console.log('📁 用户数据根目录:', runtimePaths.userDataRoot);
+
+    try {
+        migrationResult = await migrateLegacyData(runtimePaths, app, console);
+    } catch (err) {
+        const { listLegacyDataCandidates } = require('./lib/runtime-paths');
+        bootError = {
+            type: 'migration',
+            message: err.message,
+            sourcePaths: listLegacyDataCandidates(app),
+            destinationPath: runtimePaths.dataDir,
+            userDataRoot: runtimePaths.userDataRoot
+        };
+        bot.setMigrationBlocked(true, err.message);
+        throw err;
+    }
+
+    await ensureFreshCapital(runtimePaths);
+    await ensureFreshConfig(runtimePaths, bot.ConfigManager.defaultConfig);
+
+    bot.init({
+        ...runtimePaths,
+        migrationBlocked: false
+    });
+}
 
 function createWindow() {
+    const icon = resolveIcon();
     mainWindow = new BrowserWindow({
         width: 1000,
         height: 700,
         title: 'WhatsApp资金管理机器人 2.0',
+        icon,
+        autoHideMenuBar: true,
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
             preload: path.join(__dirname, 'preload.js')
-        },
-        icon: path.join(__dirname, 'assets', 'icon.ico')
+        }
     });
 
-    // 动态计算数据目录
-    const isPackaged = app.isPackaged;
-    const userDataPath = app.getPath('userData');
-    const dataDir = isPackaged 
-        ? path.join(userDataPath, 'data') 
-        : path.join(__dirname, 'data');
-
-    // 初始化机器人配置
-    bot.init({ dataDir });
-
-    // 设置主窗口引用
     bot.setMainWindow(mainWindow);
 
-    // 启动机器人逻辑
-    bot.startBot();
+    mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
-    // 加载前端界面
-    mainWindow.loadFile('index.html');
-
-    // 开发模式下打开开发者工具
     if (process.argv.includes('--dev')) {
         mainWindow.webContents.openDevTools();
     }
 
-    // 关闭事件处理
+    mainWindow.webContents.on('did-finish-load', async () => {
+        try {
+            const diagnostics = await mainWindow.webContents.executeJavaScript(`
+                ({
+                    location: location.href,
+                    styleSheets: Array.from(document.styleSheets).map(sheet => ({
+                        href: sheet.href,
+                        rulesAccessible: (() => {
+                            try { return sheet.cssRules.length; }
+                            catch (e) { return null; }
+                        })()
+                    })),
+                    containerDisplay: (() => {
+                        const el = document.querySelector('.container');
+                        return el ? getComputedStyle(el).display : null;
+                    })(),
+                    bodyBackground: getComputedStyle(document.body).backgroundColor
+                })
+            `);
+            console.log('[RendererStyles]', JSON.stringify(diagnostics));
+        } catch (err) {
+            console.warn('[RendererStyles] 诊断失败:', err.message);
+        }
+
+        if (bootError) {
+            mainWindow.webContents.send('boot-error', bootError);
+        }
+        if (
+            migrationResult &&
+            (migrationResult.capitalMigrated ||
+                migrationResult.configMigrated ||
+                migrationResult.sessionMigrated ||
+                migrationResult.conflicts.length > 0)
+        ) {
+            mainWindow.webContents.send('migration-status', migrationResult);
+        }
+        const browser = bot.getBrowserStatus();
+        if (browser.missing) {
+            mainWindow.webContents.send('browser-missing', {
+                message: '未检测到 Microsoft Edge 或 Google Chrome，请安装后再使用 WhatsApp 连接'
+            });
+        }
+    });
+
     mainWindow.on('closed', () => {
         mainWindow = null;
     });
 }
 
-// 应用启动时初始化
-app.whenReady().then(() => {
-    createWindow();
-    
-    // 确保logs目录存在
-    const logsDir = path.join(__dirname, 'logs');
-    if (!fs.existsSync(logsDir)) {
-        fs.mkdirSync(logsDir, { recursive: true });
-        // console.log('✅ 创建日志目录:', logsDir);
+app.whenReady().then(async () => {
+    Menu.setApplicationMenu(null);
+    try {
+        await prepareRuntime();
+        createWindow();
+        // 等 UI 就绪后再拉起 Puppeteer，降低首次启动浏览器进程 Code:0 失败概率
+        await new Promise((resolve) => {
+            if (!mainWindow || mainWindow.isDestroyed()) {
+                resolve();
+                return;
+            }
+            if (!mainWindow.webContents.isLoading()) {
+                resolve();
+                return;
+            }
+            mainWindow.webContents.once('did-finish-load', () => resolve());
+            setTimeout(resolve, 5000);
+        });
+        await new Promise((r) => setTimeout(r, 600));
+
+        bot.startBot().catch((err) => {
+            console.error('机器人启动失败:', err);
+            bootError = { type: 'startup', message: err.message };
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('boot-error', bootError);
+            }
+        });
+    } catch (err) {
+        console.error('运行时准备失败:', err);
+        bootError = bootError || { type: 'runtime', message: err.message };
+        // 仍打开窗口以显示错误
+        createWindow();
     }
 });
 
-// 当所有窗口关闭时退出应用
-let isQuitting = false;
 app.on('before-quit', async (event) => {
     if (isQuitting) return;
     event.preventDefault();
     isQuitting = true;
     try {
-        await bot.flushAndShutdown();
+        await Promise.race([
+            bot.flushAndShutdown(),
+            new Promise((resolve) => setTimeout(resolve, 25000))
+        ]);
     } catch (error) {
         console.error('退出前清理失败:', error.message);
     } finally {
@@ -89,164 +199,109 @@ app.on('before-quit', async (event) => {
 });
 
 app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') {
-        app.quit();
-    }
+    if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-    }
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
-// IPC 通信处理
-ipcMain.handle('request-logs', async (event) => {
+function logsDir() {
+    return (runtimePaths && runtimePaths.logsDir) || path.join(app.getPath('userData'), 'logs');
+}
+
+ipcMain.handle('request-logs', async () => {
     try {
         const logDate = new Date().toISOString().split('T')[0];
-        const logPath = path.join(__dirname, 'data', 'logs', `${logDate}.log`);
-        
-        if (!fs.existsSync(logPath)) {
-            return ['暂无日志数据'];
-        }
-        
-        const logs = fs.readFileSync(logPath, 'utf8').split('\n');
-        const filteredLogs = logs.filter(line => line.trim() !== '');
-        
-        const readableLogs = filteredLogs.map(line => {
+        const logPath = path.join(logsDir(), `${logDate}.log`);
+        if (!fs.existsSync(logPath)) return ['暂无日志数据'];
+        const logs = fs.readFileSync(logPath, 'utf8').split('\n').filter((l) => l.trim());
+        return logs.map((line) => {
             try {
                 const logData = JSON.parse(line);
                 const time = new Date(logData.timestamp).toLocaleTimeString();
                 return `[${time}] [${logData.type}] ${logData.event || logData.action || '未知操作'}`;
-            } catch (e) {
+            } catch (_) {
                 return line;
             }
         });
-        
-        return readableLogs;
     } catch (error) {
-        console.error('读取日志失败:', error);
         return ['读取日志失败'];
     }
 });
 
-ipcMain.handle('request-config', async (event) => {
-    try {
-        const config = bot.ConfigManager.getConfig();
-        return config;
-    } catch (error) {
-        console.error('读取配置失败:', error);
-        return null;
-    }
-});
+ipcMain.handle('request-config', async () => bot.ConfigManager.getConfig());
 
-ipcMain.handle('update-config', async (event, configUpdates) => {
+ipcMain.handle('update-config', async (_e, configUpdates) => {
     try {
-        const success = bot.ConfigManager.saveConfig(configUpdates);
-        if (success) {
-            return { success: true };
-        } else {
-            return { success: false, error: '保存配置失败' };
-        }
+        const savedConfig = bot.ConfigManager.saveConfig(configUpdates);
+        return { success: true, config: savedConfig };
     } catch (error) {
-        console.error('更新配置失败:', error);
         return { success: false, error: error.message };
     }
 });
 
-ipcMain.handle('export-data', async (event, groupId) => {
+ipcMain.handle('export-data', async (_e, groupId) => {
     try {
         const data = bot.CapitalManager2.getData();
-        const exportPath = path.join(__dirname, 'data', `export_${groupId}_${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-        
+        const dir = runtimePaths ? runtimePaths.dataDir : app.getPath('userData');
+        const exportPath = path.join(
+            dir,
+            `export_${groupId}_${new Date().toISOString().replace(/[:.]/g, '-')}.json`
+        );
         fs.writeFileSync(exportPath, JSON.stringify(data, null, 2));
         return { success: true, path: exportPath };
     } catch (error) {
-        console.error('导出数据失败:', error);
         return { success: false, error: error.message };
     }
 });
 
-// 群组数据请求处理
-ipcMain.handle('request-group-data', async (event) => {
+ipcMain.handle('request-group-data', async () => {
     try {
-        const data = bot.CapitalManager2.getData();
-        
-        // 过滤掉系统字段，只保留群组数据
-        const groups = {};
+        const data = bot.CapitalManager2.getData() || {};
         let totalOperations = 0;
-        
-        Object.keys(data).forEach(key => {
-            if (key !== '_description' && key !== '_adminIds') {
-                const groupData = data[key];
-                if (groupData && typeof groupData === 'object' && groupData.capital !== undefined) {
-                    groups[key] = {
-                        operations: groupData.statistics ? groupData.statistics.totalOperations || 0 : 0
-                    };
-                    totalOperations += groups[key].operations;
-                }
+        let activeGroups = 0;
+        Object.keys(data).forEach((key) => {
+            if (key.startsWith('_')) return;
+            const groupData = data[key];
+            if (groupData && typeof groupData === 'object' && groupData.capital !== undefined) {
+                activeGroups++;
+                totalOperations += groupData.statistics?.totalOperations || 0;
             }
         });
-        
-        const activeGroups = Object.keys(groups).length;
-        
-        return {
-            activeGroups,
-            totalOperations
-        };
-    } catch (error) {
-        console.error('读取群组数据失败:', error);
-        return {
-            activeGroups: 0,
-            totalOperations: 0
-        };
+        return { activeGroups, totalOperations };
+    } catch (_) {
+        return { activeGroups: 0, totalOperations: 0 };
     }
 });
 
-// 消息统计请求处理
-ipcMain.handle('request-message-stats', async (event) => {
+ipcMain.handle('request-message-stats', async () => {
     try {
-        // 从机器人获取消息处理统计
-        const stats = bot.getMessageStats();
-        return stats;
-    } catch (error) {
-        console.error('读取消息统计失败:', error);
-        return {
-            totalMessages: 0,
-            processedMessages: 0,
-            failedMessages: 0,
-            lastReset: Date.now()
-        };
+        return bot.getMessageStats();
+    } catch (_) {
+        return { totalMessages: 0, processedMessages: 0, failedMessages: 0, lastReset: Date.now() };
     }
 });
 
-// 连接状态请求处理
-ipcMain.handle('request-connection-status', async (event) => {
+ipcMain.handle('request-connection-status', async () => {
     try {
-        const status = bot.getConnectionStatus();
-        return status;
-    } catch (error) {
-        console.error('读取连接状态失败:', error);
-        return {
-            isConnected: false,
-            reconnectAttempts: 0,
-            lastHeartbeat: Date.now(),
-            uptime: 0
-        };
+        return bot.getConnectionStatus();
+    } catch (_) {
+        return { isConnected: false, reconnectAttempts: 0, lastHeartbeat: Date.now(), uptime: 0 };
     }
 });
 
-// 消息队列状态请求处理
-ipcMain.handle('request-queue-status', async (event) => {
+ipcMain.handle('request-queue-status', async () => {
     try {
-        const queueStatus = bot.MessageManager.getQueueStatus();
-        return queueStatus;
-    } catch (error) {
-        console.error('读取队列状态失败:', error);
-        return {
-            queueLength: 0,
-            isProcessing: false,
-            sendingMessages: 0
-        };
+        return bot.MessageManager.getQueueStatus();
+    } catch (_) {
+        return { queueLength: 0, isProcessing: false, sendingMessages: 0 };
     }
 });
+
+ipcMain.handle('request-runtime-info', async () => ({
+    userDataRoot: runtimePaths?.userDataRoot,
+    capitalPath: runtimePaths?.capitalPath,
+    migrationResult,
+    bootError
+}));

@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "adminIds": [],
+  "allowedGroupIds": [],
+  "maxConcurrentGroups": 8,
+  "autoBackup": true,
+  "backupInterval": 24,
+  "maxHistoryRecords": 1000,
+  "cleanupDays": 30,
+  "enableNotifications": true,
+  "language": "zh-CN",
+  "theme": "default"
+}

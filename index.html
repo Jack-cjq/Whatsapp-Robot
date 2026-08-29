@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WhatsApp资金管理机器人 2.0</title>
-    <link rel="stylesheet" href="styles.css">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css">
+    <link rel="stylesheet" href="./assets/vendor/icons.css">
 </head>
 <body>
     <div class="container">
@@ -173,14 +173,16 @@
                 
                 <div class="log-container">
                     <div class="log-filters">
-                        <select id="logLevel" onchange="filterLogs()">
+                        <label for="logLevel" class="sr-only">日志级别</label>
+                        <select id="logLevel" onchange="filterLogs()" aria-label="日志级别" title="日志级别">
                             <option value="all">所有级别</option>
                             <option value="SYSTEM">系统</option>
                             <option value="OPERATION">操作</option>
                             <option value="ERROR">错误</option>
                             <option value="SECURITY">安全</option>
                         </select>
-                        <input type="text" id="logSearch" placeholder="搜索日志..." onkeyup="filterLogs()">
+                        <label for="logSearch" class="sr-only">搜索日志</label>
+                        <input type="text" id="logSearch" placeholder="搜索日志..." onkeyup="filterLogs()" aria-label="搜索日志" title="搜索日志">
                     </div>
                     
                     <div class="log-list" id="logList">

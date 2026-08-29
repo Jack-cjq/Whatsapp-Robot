@@ -2,6 +2,9 @@
 let currentTab = 'dashboard';
 let logs = [];
 let config = {};
+let uptimeTimer = null;
+let uptimeBaseMs = null;
+let uptimeSampledAt = 0;
 
 // DOM 加载完成后初始化
 document.addEventListener('DOMContentLoaded', function() {
@@ -85,6 +88,42 @@ function setupEventListeners() {
             }
         });
     }
+
+    if (window.electronAPI && window.electronAPI.onBootError) {
+        window.electronAPI.onBootError((_e, err) => {
+            const msg = err && err.message ? err.message : '未知错误';
+            const dest = err && err.destinationPath ? `\n新目录: ${err.destinationPath}` : '';
+            const src =
+                err && err.sourcePaths && err.sourcePaths.length
+                    ? `\n旧目录候选: ${err.sourcePaths.join(' | ')}`
+                    : '';
+            showNotification(`启动失败（机器人未启动）: ${msg}${dest}${src}`, 'error');
+        });
+    }
+    if (window.electronAPI && window.electronAPI.onBrowserMissing) {
+        window.electronAPI.onBrowserMissing((_e, info) => {
+            showNotification(
+                (info && info.message) || '未检测到 Edge/Chrome，请安装浏览器后重试',
+                'error'
+            );
+        });
+    }
+    if (window.electronAPI && window.electronAPI.onMigrationStatus) {
+        window.electronAPI.onMigrationStatus((_e, result) => {
+            const migrated = [];
+            if (result && result.capitalMigrated) migrated.push('账本');
+            if (result && result.configMigrated) migrated.push('配置');
+            if (result && result.sessionMigrated) migrated.push('登录会话');
+            if (migrated.length > 0) {
+                showNotification(`已安全迁移旧${migrated.join('、')}，原数据仍保留`, 'success');
+            }
+            const hasSessionConflict = Array.isArray(result && result.conflicts) &&
+                result.conflicts.some((item) => item && item.type === 'session');
+            if (hasSessionConflict) {
+                showNotification('检测到两套 WhatsApp 登录会话，已保留 EXE 当前会话，未自动合并', 'warning');
+            }
+        });
+    }
 }
 
 // 加载初始数据
@@ -113,6 +152,11 @@ async function updateConnectionStatus() {
     try {
         if (window.electronAPI && window.electronAPI.requestConnectionStatus) {
             const status = await window.electronAPI.requestConnectionStatus();
+            if (Number.isFinite(status.uptime) && status.uptime >= 0) {
+                uptimeBaseMs = status.uptime;
+                uptimeSampledAt = Date.now();
+                renderUptime();
+            }
             
             if (status.isConnected) {
                 statusDot.classList.add('connected');
@@ -144,16 +188,20 @@ async function updateConnectionStatus() {
 
 // 更新运行时间
 function updateUptime() {
-    const uptimeElement = document.getElementById('uptime');
-    let seconds = 0;
+    if (uptimeTimer) return;
+    renderUptime();
+    uptimeTimer = setInterval(renderUptime, 1000);
+}
 
-    setInterval(() => {
-        seconds++;
-        const hours = Math.floor(seconds / 3600);
-        const minutes = Math.floor((seconds % 3600) / 60);
-        const secs = seconds % 60;
-        uptimeElement.textContent = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }, 1000);
+function renderUptime() {
+    const uptimeElement = document.getElementById('uptime');
+    if (!uptimeElement || uptimeBaseMs === null) return;
+    const elapsedMs = uptimeBaseMs + Math.max(0, Date.now() - uptimeSampledAt);
+    const seconds = Math.floor(elapsedMs / 1000);
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    uptimeElement.textContent = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
 // 更新消息计数
@@ -284,13 +332,35 @@ function loadLogs() {
     }
 }
 
+function createTextElement(tagName, className, text) {
+    const element = document.createElement(tagName);
+    if (className) element.className = className;
+    element.textContent = String(text);
+    return element;
+}
+
+function renderMessageState(container, className, iconClass, messages) {
+    const wrapper = document.createElement('div');
+    wrapper.className = className;
+    if (iconClass) {
+        const icon = document.createElement('i');
+        icon.className = iconClass;
+        wrapper.appendChild(icon);
+    }
+    for (const message of messages) wrapper.appendChild(createTextElement('p', '', message));
+    container.replaceChildren(wrapper);
+}
+
 // 显示日志
 function displayLogs(logData) {
     const logList = document.getElementById('logList');
-    logList.innerHTML = '';
+    logList.replaceChildren();
 
     if (logData.length === 0) {
-        logList.innerHTML = '<div class="log-item"><span class="log-message">暂无日志数据</span></div>';
+        const emptyItem = document.createElement('div');
+        emptyItem.className = 'log-item';
+        emptyItem.appendChild(createTextElement('span', 'log-message', '暂无日志数据'));
+        logList.appendChild(emptyItem);
         return;
     }
 
@@ -302,11 +372,8 @@ function displayLogs(logData) {
         const time = timeMatch ? timeMatch[1] : '';
         const message = log.replace(/\[[^\]]+\]\s*/, '');
         
-        logItem.innerHTML = `
-            <span class="log-time">[${time}]</span>
-            <span class="log-message">${message}</span>
-        `;
-        
+        logItem.appendChild(createTextElement('span', 'log-time', `[${time}]`));
+        logItem.appendChild(createTextElement('span', 'log-message', message));
         logList.appendChild(logItem);
     });
 }
@@ -374,19 +441,29 @@ function loadConfig() {
 // 填充配置表单
 function populateConfigForm(configData) {
     document.getElementById('adminIds').value = configData.adminIds ? configData.adminIds.join(', ') : '';
-    document.getElementById('maxHistoryRecords').value = configData.maxHistoryRecords || 1000;
-    document.getElementById('autoBackup').checked = configData.autoBackup || false;
-    document.getElementById('backupInterval').value = configData.backupInterval || 24;
-    document.getElementById('enableNotifications').checked = configData.enableNotifications || false;
+    document.getElementById('maxHistoryRecords').value = configData.maxHistoryRecords ?? 1000;
+    document.getElementById('autoBackup').checked = configData.autoBackup === true;
+    document.getElementById('backupInterval').value = configData.backupInterval ?? 24;
+    document.getElementById('enableNotifications').checked = configData.enableNotifications === true;
 }
 
 // 保存配置
 function saveConfig() {
+    const maxHistoryRecords = Number.parseInt(document.getElementById('maxHistoryRecords').value, 10);
+    const backupInterval = Number.parseInt(document.getElementById('backupInterval').value, 10);
+    if (!Number.isInteger(maxHistoryRecords) || maxHistoryRecords < 100 || maxHistoryRecords > 10000) {
+        showNotification('最大历史记录数必须在 100-10000 之间', 'warning');
+        return;
+    }
+    if (!Number.isInteger(backupInterval) || backupInterval < 1 || backupInterval > 168) {
+        showNotification('备份间隔必须在 1-168 小时之间', 'warning');
+        return;
+    }
     const configUpdates = {
         adminIds: document.getElementById('adminIds').value.split(',').map(id => id.trim()).filter(id => id),
-        maxHistoryRecords: parseInt(document.getElementById('maxHistoryRecords').value),
+        maxHistoryRecords,
         autoBackup: document.getElementById('autoBackup').checked,
-        backupInterval: parseInt(document.getElementById('backupInterval').value),
+        backupInterval,
         enableNotifications: document.getElementById('enableNotifications').checked
     };
 
@@ -394,7 +471,7 @@ function saveConfig() {
         window.electronAPI.updateConfig(configUpdates).then(result => {
             if (result.success) {
                 showNotification('配置保存成功', 'success');
-                config = { ...config, ...configUpdates };
+                config = result.config || { ...config, ...configUpdates };
             } else {
                 showNotification('配置保存失败: ' + result.error, 'error');
             }
@@ -452,53 +529,19 @@ function refreshLogs() {
 
 // 显示通知
 function showNotification(message, type = 'info') {
-    // 创建通知元素
+    const allowedTypes = new Set(['info', 'success', 'warning', 'error']);
+    const safeType = allowedTypes.has(type) ? type : 'info';
     const notification = document.createElement('div');
-    notification.className = `notification notification-${type}`;
-    notification.innerHTML = `
-        <div class="notification-content">
-            <span class="notification-message">${message}</span>
-            <button class="notification-close" onclick="this.parentElement.parentElement.remove()">×</button>
-        </div>
-    `;
-
-    // 添加样式
-    notification.style.cssText = `
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        background: ${type === 'success' ? '#51cf66' : type === 'error' ? '#ff6b6b' : type === 'warning' ? '#ffd43b' : '#667eea'};
-        color: white;
-        padding: 15px 20px;
-        border-radius: 8px;
-        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
-        z-index: 1000;
-        max-width: 300px;
-        animation: slideIn 0.3s ease;
-    `;
-
-    // 添加动画样式
-    const style = document.createElement('style');
-    style.textContent = `
-        @keyframes slideIn {
-            from { transform: translateX(100%); opacity: 0; }
-            to { transform: translateX(0); opacity: 1; }
-        }
-        .notification-content {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-        .notification-close {
-            background: none;
-            border: none;
-            color: white;
-            font-size: 18px;
-            cursor: pointer;
-            margin-left: 10px;
-        }
-    `;
-    document.head.appendChild(style);
+    notification.className = `notification notification-${safeType}`;
+    const content = document.createElement('div');
+    content.className = 'notification-content';
+    content.appendChild(createTextElement('span', 'notification-message', message));
+    const closeButton = createTextElement('button', 'notification-close', '×');
+    closeButton.type = 'button';
+    closeButton.setAttribute('aria-label', '关闭通知');
+    closeButton.addEventListener('click', () => notification.remove());
+    content.appendChild(closeButton);
+    notification.appendChild(content);
 
     document.body.appendChild(notification);
 
@@ -564,7 +607,7 @@ function closeAdminListModal() {
 
 function loadAdminList() {
     const adminList = document.getElementById('adminList');
-    adminList.innerHTML = '<div class="loading">正在加载管理员列表...</div>';
+    renderMessageState(adminList, 'loading', '', ['正在加载管理员列表...']);
 
     if (window.electronAPI && window.electronAPI.requestConfig) {
         window.electronAPI.requestConfig().then(configData => {
@@ -572,11 +615,16 @@ function loadAdminList() {
             displayAdminList(admins);
         }).catch(error => {
             console.error('加载管理员列表失败:', error);
-            adminList.innerHTML = '<div class="empty-list"><i class="fas fa-exclamation-triangle"></i><p>加载失败</p></div>';
+            renderMessageState(
+                adminList,
+                'empty-list',
+                'fas fa-exclamation-triangle',
+                ['加载失败']
+            );
         });
     } else {
         // 演示模式
-        const mockAdmins = ['演示管理员', 'Tongyang'];
+        const mockAdmins = ['演示管理员', '示例管理员'];
         displayAdminList(mockAdmins);
     }
 }
@@ -585,36 +633,37 @@ function displayAdminList(admins) {
     const adminList = document.getElementById('adminList');
     
     if (admins.length === 0) {
-        adminList.innerHTML = `
-            <div class="empty-list">
-                <i class="fas fa-users"></i>
-                <p>暂无管理员</p>
-                <p>点击"添加管理员"来添加第一个管理员</p>
-            </div>
-        `;
+        renderMessageState(
+            adminList,
+            'empty-list',
+            'fas fa-users',
+            ['暂无管理员', '点击"添加管理员"来添加第一个管理员']
+        );
         return;
     }
 
-    const adminItems = admins.map(admin => `
-        <div class="admin-item">
-            <div class="admin-info">
-                <div class="admin-name">${admin}</div>
-                <div class="admin-phone">用户名</div>
-            </div>
-            <div class="admin-actions-item">
-                <button class="btn btn-danger btn-sm" onclick="removeAdmin('${admin}')">
-                    <i class="fas fa-trash"></i> 删除
-                </button>
-            </div>
-        </div>
-    `).join('');
-
-    adminList.innerHTML = adminItems;
+    const fragment = document.createDocumentFragment();
+    for (const admin of admins) {
+        const item = document.createElement('div');
+        item.className = 'admin-item';
+        const info = document.createElement('div');
+        info.className = 'admin-info';
+        info.appendChild(createTextElement('div', 'admin-name', admin));
+        info.appendChild(createTextElement('div', 'admin-phone', '用户名'));
+        const actions = document.createElement('div');
+        actions.className = 'admin-actions-item';
+        const removeButton = createTextElement('button', 'btn btn-danger btn-sm', '删除');
+        removeButton.type = 'button';
+        removeButton.addEventListener('click', () => removeAdmin(admin));
+        actions.appendChild(removeButton);
+        item.append(info, actions);
+        fragment.appendChild(item);
+    }
+    adminList.replaceChildren(fragment);
 }
 
 function addAdmin() {
     const name = document.getElementById('newAdminName').value.trim();
-    const phone = document.getElementById('newAdminPhone').value.trim();
 
     if (!name) {
         showNotification('请输入管理员用户名', 'warning');
@@ -630,11 +679,11 @@ function addAdmin() {
                 return;
             }
 
-            admins.push(name);
-            const newConfig = { ...configData, adminIds: admins };
+            const newConfig = { adminIds: [...admins, name] };
 
             window.electronAPI.updateConfig(newConfig).then(result => {
                 if (result.success) {
+                    config = result.config || { ...configData, ...newConfig };
                     showNotification('管理员添加成功', 'success');
                     closeAddAdminModal();
                     updateAdminCount();
@@ -672,10 +721,11 @@ function removeAdmin(adminName) {
                 return;
             }
 
-            const newConfig = { ...configData, adminIds: newAdmins };
+            const newConfig = { adminIds: newAdmins };
 
             window.electronAPI.updateConfig(newConfig).then(result => {
                 if (result.success) {
+                    config = result.config || { ...configData, ...newConfig };
                     showNotification('管理员删除成功', 'success');
                     updateAdminCount();
                     loadAdminList();

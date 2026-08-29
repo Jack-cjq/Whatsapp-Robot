@@ -34,5 +34,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     
     // 日志数据
     onLogData: (callback) => ipcRenderer.on('log-data', callback),
-    onConfigData: (callback) => ipcRenderer.on('config-data', callback)
+    onConfigData: (callback) => ipcRenderer.on('config-data', callback),
+
+    // 启动/浏览器错误
+    onBootError: (callback) => ipcRenderer.on('boot-error', callback),
+    onBrowserMissing: (callback) => ipcRenderer.on('browser-missing', callback),
+    onMigrationStatus: (callback) => ipcRenderer.on('migration-status', callback),
+    requestRuntimeInfo: () => ipcRenderer.invoke('request-runtime-info')
 });

@@ -78,7 +78,7 @@ ipcMain.handle('request-logs', async (event) => {
 
 // 演示模式配置存储
 let demoConfig = {
-    adminIds: ['演示管理员', 'Tongyang'],
+    adminIds: ['演示管理员', '示例管理员'],
     maxHistoryRecords: 1000,
     autoBackup: true,
     backupInterval: 24,
